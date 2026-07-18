@@ -1,6 +1,6 @@
 # PerAppProxy
 
-**Per-application HTTP/HTTPS proxy router for Windows.**
+**Per-application HTTP/HTTPS proxy router for Windows & Linux.**
 
 Route different apps through different proxy servers — each app gets its own IP. Built-in free proxy pool with auto-fetch from public sources.
 
@@ -17,9 +17,10 @@ System   → SOCKS5 RU  → IP: 198.51.100.99
 - **Free proxy pool** — fetch thousands of public SOCKS5/HTTP proxies
 - **Auto-validate** — test which proxies are alive and measure latency
 - **Quick assign** — pick a proxy from the pool in one command
-- **System proxy toggle** — enable/disable Windows system-wide proxy
+- **System proxy toggle** — enable/disable system-wide proxy
 - **Connection scanner** — see which apps are online and where they connect
 - **Lightweight** — pure Python, no kernel drivers, no VPN tunnel
+- **Cross-platform** — Windows 10/11 and Linux
 
 ## Install
 
@@ -35,7 +36,12 @@ cd perappproxy
 pip install -e .
 ```
 
-Requires **Python 3.11+** on **Windows 10/11**.
+On Windows, you may want to install with Windows extras:
+```bash
+pip install -e ".[win]"
+```
+
+Requires **Python 3.11+** on **Windows 10/11** or **Linux**.
 
 ## Quick Start
 
@@ -183,9 +189,9 @@ upstream = "socks5://eu-server:1080"
 
 ## Requirements
 
-- Windows 10/11
 - Python 3.11+
-- Admin rights (for system proxy changes)
+- Windows 10/11 or Linux
+- Admin/root rights (for system proxy changes)
 
 ## License
 

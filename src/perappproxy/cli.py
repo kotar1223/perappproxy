@@ -226,7 +226,7 @@ def list_rules() -> None:
 
 @cli.command("proxy-on")
 def proxy_on_cmd() -> None:
-    """Enable Windows system proxy."""
+    """Enable system proxy."""
     config = load_config()
     set_system_proxy(config.listen_host, config.listen_port)
     console.print(f"[green]System proxy ON -> 127.0.0.1:{config.listen_port}[/]")
@@ -234,7 +234,7 @@ def proxy_on_cmd() -> None:
 
 @cli.command("proxy-off")
 def proxy_off_cmd() -> None:
-    """Disable Windows system proxy."""
+    """Disable system proxy."""
     disable_system_proxy()
     console.print("[green]System proxy OFF[/]")
 
@@ -461,11 +461,15 @@ def config_path_cmd() -> None:
 
 @cli.command()
 def edit() -> None:
-    """Open config in Notepad."""
+    """Open config in default editor."""
     config = load_config()
     save_config(config)
     import subprocess
-    subprocess.Popen(["notepad", str(CONFIG_FILE)])
+    import sys
+    if sys.platform == "win32":
+        subprocess.Popen(["notepad", str(CONFIG_FILE)])
+    else:
+        subprocess.Popen(["xdg-open", str(CONFIG_FILE)])
     console.print(f"[dim]{CONFIG_FILE}[/]")
 
 

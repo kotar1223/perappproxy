@@ -4,16 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "perappproxy"
-version = "0.2.0"
-description = "Per-application HTTP/HTTPS proxy router for Windows with free proxy pool"
+version = "0.3.0"
+description = "Per-application HTTP/HTTPS proxy router for Windows & Linux with free proxy pool"
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",
     "rich>=13.0",
     "psutil>=5.9",
-    "pywin32>=306",
     "httpx>=0.27",
 ]
+
+[project.optional-dependencies]
+win = ["pywin32>=306"]
 
 [project.scripts]
 perappproxy = "perappproxy.__main__:main"
