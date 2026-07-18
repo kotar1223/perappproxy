@@ -11,8 +11,23 @@ DDNet    → SOCKS5 Asia → IP: 192.0.2.7
 System   → SOCKS5 RU  → IP: 198.51.100.99
 ```
 
+## Download
+
+**Windows (.exe) — no Python required:**
+
+| File | Description | Size |
+|------|-------------|------|
+| [PerAppProxy.exe](https://github.com/kotar1223/perappproxy/releases/latest/download/PerAppProxy.exe) | GUI version | 15 MB |
+| [perappproxy-cli.exe](https://github.com/kotar1223/perappproxy/releases/latest/download/perappproxy-cli.exe) | CLI version | 7 MB |
+
+**Python install (Windows/Linux):**
+```bash
+pip install git+https://github.com/kotar1223/perappproxy.git
+```
+
 ## Features
 
+- **GUI + CLI** — use graphical interface or terminal
 - **Per-app routing** — different process, different proxy, different IP
 - **Free proxy pool** — fetch thousands of public SOCKS5/HTTP proxies
 - **Auto-validate** — test which proxies are alive and measure latency
@@ -21,27 +36,6 @@ System   → SOCKS5 RU  → IP: 198.51.100.99
 - **Connection scanner** — see which apps are online and where they connect
 - **Lightweight** — pure Python, no kernel drivers, no VPN tunnel
 - **Cross-platform** — Windows 10/11 and Linux
-
-## Install
-
-```bash
-pip install git+https://github.com/kotar1223/perappproxy.git
-```
-
-Or clone and install locally:
-
-```bash
-git clone https://github.com/kotar1223/perappproxy.git
-cd perappproxy
-pip install -e .
-```
-
-On Windows, you may want to install with Windows extras:
-```bash
-pip install -e ".[win]"
-```
-
-Requires **Python 3.11+** on **Windows 10/11** or **Linux**.
 
 ## Quick Start
 
