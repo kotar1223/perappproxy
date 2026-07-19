@@ -1,4 +1,4 @@
-"""PerAppProxy GUI — fully standalone version for PyInstaller."""
+"""PerAppProxy GUI v1.1 — standalone, with logs and full controls."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import asyncio
 import ctypes
 import ctypes.wintypes
 import json
+import logging
 import os
-import random
 import signal
 import socket
 import sys
@@ -16,9 +16,29 @@ import time
 import tkinter as tk
 import winreg
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, scrolledtext, ttk
 from typing import Optional
+
+# ─── LOG SETUP ────────────────────────────────────────────────
+
+LOG_DIR = Path.home() / ".perappproxy" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+log = logging.getLogger("perappproxy")
+log.setLevel(logging.DEBUG)
+
+_file_handler = logging.FileHandler(LOG_DIR / "proxy.log", encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S"))
+log.addHandler(_file_handler)
+
+
+def log_to_gui(msg: str, level: str = "INFO") -> None:
+    log.log(getattr(logging, level, logging.INFO), msg)
+    if hasattr(app, "_log_queue"):
+        app._log_queue.put((msg, level))
+
 
 # ─── CONFIG ───────────────────────────────────────────────────
 
@@ -27,10 +47,12 @@ CONFIG_FILE = CONFIG_DIR / "config.toml"
 PID_FILE = CONFIG_DIR / "proxy.pid"
 PROXY_CACHE = CONFIG_DIR / "proxy_pool.json"
 
+
 @dataclass
 class Rule:
     process: str
     upstream: str
+
 
 @dataclass
 class Config:
@@ -71,13 +93,18 @@ def _read_toml(path: Path) -> dict:
         elif "=" in s and current_section is not None:
             k, v = s.split("=", 1)
             k, v = k.strip(), v.strip().strip('"')
-            if v.lower() == "true": v = True
-            elif v.lower() == "false": v = False
+            if v.lower() == "true":
+                v = True
+            elif v.lower() == "false":
+                v = False
             else:
-                try: v = int(v)
+                try:
+                    v = int(v)
                 except ValueError:
-                    try: v = float(v)
-                    except ValueError: pass
+                    try:
+                        v = float(v)
+                    except ValueError:
+                        pass
             current_section[k] = v
     return result
 
@@ -123,7 +150,14 @@ iphlpapi = ctypes.windll.iphlpapi
 
 
 class MIB_TCPROW_OWNER_PID(ctypes.Structure):
-    _fields_ = [("dwState", ctypes.wintypes.DWORD), ("dwLocalAddr", ctypes.wintypes.DWORD), ("dwLocalPort", ctypes.wintypes.DWORD), ("dwRemoteAddr", ctypes.wintypes.DWORD), ("dwRemotePort", ctypes.wintypes.DWORD), ("dwOwningPid", ctypes.wintypes.DWORD)]
+    _fields_ = [
+        ("dwState", ctypes.wintypes.DWORD),
+        ("dwLocalAddr", ctypes.wintypes.DWORD),
+        ("dwLocalPort", ctypes.wintypes.DWORD),
+        ("dwRemoteAddr", ctypes.wintypes.DWORD),
+        ("dwRemotePort", ctypes.wintypes.DWORD),
+        ("dwOwningPid", ctypes.wintypes.DWORD),
+    ]
 
 
 def get_pid_for_port(local_port: int) -> int | None:
@@ -153,12 +187,14 @@ def get_process_name(pid: int) -> str | None:
 
 INTERNET_SETTINGS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 
+
 def set_system_proxy(host: str, port: int) -> None:
     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INTERNET_SETTINGS_KEY, 0, winreg.KEY_ALL_ACCESS)
     winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
     winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"127.0.0.1:{port}")
     winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, "localhost;127.*;<local>")
     winreg.CloseKey(key)
+
 
 def disable_system_proxy() -> None:
     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INTERNET_SETTINGS_KEY, 0, winreg.KEY_ALL_ACCESS)
@@ -169,6 +205,7 @@ def disable_system_proxy() -> None:
 # ─── PROXY SERVER ─────────────────────────────────────────────
 
 BUFFER_SIZE = 65536
+
 
 class ProxyServer:
     def __init__(self, host: str, port: int, config: Config) -> None:
@@ -181,12 +218,14 @@ class ProxyServer:
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle_client, self.host, self.port)
         self._running = True
+        log_to_gui(f"Server started on {self.host}:{self.port}")
 
     async def stop(self) -> None:
         self._running = False
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+        log_to_gui("Server stopped")
 
     @property
     def is_running(self) -> bool:
@@ -201,6 +240,7 @@ class ProxyServer:
             return self.config.global_upstream or None
         for r in self.config.rules:
             if r.process.lower() == name.lower():
+                log_to_gui(f"Route {name}:{local_port} -> {r.upstream}")
                 return r.upstream
         return self.config.global_upstream or None
 
@@ -229,8 +269,10 @@ class ProxyServer:
                 await self._handle_connect(reader, writer, parts[1], local_port)
             else:
                 await self._handle_http(reader, writer, line, local_port)
-        except Exception:
-            pass
+        except asyncio.TimeoutError:
+            log_to_gui(f"Timeout on port {local_port}", "WARNING")
+        except Exception as e:
+            log_to_gui(f"Error on port {local_port}: {e}", "ERROR")
         finally:
             try:
                 writer.close()
@@ -248,11 +290,13 @@ class ProxyServer:
         port = int(port)
         try:
             uh, up = self._parse_proxy(upstream)
+            log_to_gui(f"CONNECT {host}:{port} via {uh}:{up}")
             ur, uw = await asyncio.wait_for(asyncio.open_connection(uh, up), timeout=30)
             uw.write(f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n".encode())
             await uw.drain()
             resp = await asyncio.wait_for(ur.readline(), timeout=30)
             if not resp or b"200" not in resp:
+                log_to_gui(f"Upstream rejected CONNECT to {host}:{port}", "WARNING")
                 writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                 await writer.drain()
                 uw.close()
@@ -264,7 +308,8 @@ class ProxyServer:
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await writer.drain()
             await self._tunnel(reader, writer, ur, uw)
-        except Exception:
+        except Exception as e:
+            log_to_gui(f"CONNECT error: {e}", "ERROR")
             try:
                 writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                 await writer.drain()
@@ -294,7 +339,8 @@ class ProxyServer:
                 writer.write(d)
                 await writer.drain()
             uw.close()
-        except Exception:
+        except Exception as e:
+            log_to_gui(f"HTTP error: {e}", "ERROR")
             try:
                 writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                 await writer.drain()
@@ -306,13 +352,17 @@ class ProxyServer:
             try:
                 while True:
                     data = await s.read(BUFFER_SIZE)
-                    if not data: break
+                    if not data:
+                        break
                     d.write(data)
                     await d.drain()
-            except Exception: pass
+            except Exception:
+                pass
             finally:
-                try: d.close()
-                except Exception: pass
+                try:
+                    d.close()
+                except Exception:
+                    pass
         await asyncio.gather(asyncio.create_task(copy(cr, uw)), asyncio.create_task(copy(ur, cw)), return_exceptions=True)
 
 
@@ -368,6 +418,7 @@ class ProxyPool:
     def fetch(self) -> list[ProxyEntry]:
         new = []
         existing = {p.address for p in self.proxies}
+        log_to_gui("Fetching proxies from sources...")
         with httpx.Client(timeout=10, follow_redirects=True) as c:
             for url in FREE_PROXY_SOURCES:
                 try:
@@ -379,16 +430,20 @@ class ProxyPool:
                         if line and ":" in line and line not in existing:
                             new.append(ProxyEntry(address=line, protocol=proto))
                             existing.add(line)
-                except Exception:
-                    continue
+                    log_to_gui(f"Source {url.split('/')[-1]}: found {len(new)} total")
+                except Exception as e:
+                    log_to_gui(f"Source error: {e}", "WARNING")
         self.proxies.extend(new)
         self._save()
+        log_to_gui(f"Fetched {len(new)} new proxies, total: {len(self.proxies)}")
         return new
 
     def check(self) -> list[ProxyEntry]:
         alive = []
+        total = len(self.proxies)
+        log_to_gui(f"Checking {total} proxies...")
         with httpx.Client(timeout=5, follow_redirects=True) as c:
-            for p in self.proxies:
+            for i, p in enumerate(self.proxies):
                 try:
                     start = time.time()
                     r = c.get("http://httpbin.org/ip", proxy=p.url, timeout=5)
@@ -399,7 +454,10 @@ class ProxyPool:
                         alive.append(p)
                 except Exception:
                     p.alive = False
+                if (i + 1) % 100 == 0:
+                    log_to_gui(f"Checked {i+1}/{total}")
         self._save()
+        log_to_gui(f"Check done: {len(alive)} alive / {total} total")
         return alive
 
     def add(self, address: str, protocol: str = "socks5") -> ProxyEntry:
@@ -407,6 +465,7 @@ class ProxyPool:
         entry = ProxyEntry(address=address, protocol=protocol, alive=True, last_checked=time.time())
         self.proxies.append(entry)
         self._save()
+        log_to_gui(f"Added proxy: {entry.url}")
         return entry
 
     def remove(self, address: str) -> bool:
@@ -414,8 +473,15 @@ class ProxyPool:
         self.proxies = [p for p in self.proxies if p.address != address]
         if len(self.proxies) < before:
             self._save()
+            log_to_gui(f"Removed proxy: {address}")
             return True
         return False
+
+    def clear(self) -> None:
+        count = len(self.proxies)
+        self.proxies.clear()
+        self._save()
+        log_to_gui(f"Cleared pool: removed {count} proxies")
 
     def count(self) -> dict:
         alive = sum(1 for p in self.proxies if p.alive)
@@ -427,24 +493,32 @@ class ProxyPool:
 class PerAppProxyGUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("PerAppProxy v1.0.0")
-        self.root.geometry("750x580")
+        self.root.title("PerAppProxy v1.1")
+        self.root.geometry("800x650")
         self.config = load_config()
         self.pool = ProxyPool()
         self.server: Optional[ProxyServer] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self._log_queue: queue.Queue = queue.Queue()
         self._build()
         self._refresh_status()
+        self._poll_logs()
 
     def _build(self):
         nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=5, pady=5)
+        nb.pack(fill="both", expand=True, padx=5, pady=(5, 0))
+
         self._build_server_tab(nb)
         self._build_rules_tab(nb)
         self._build_pool_tab(nb)
         self._build_scanner_tab(nb)
+        self._build_log_tab(nb)
 
-    # ─── SERVER ───
+        # Status bar
+        self.status_bar = ttk.Label(self.root, text="Ready", relief="sunken", anchor="w")
+        self.status_bar.pack(fill="x", side="bottom", padx=5, pady=5)
+
+    # ─── SERVER TAB ────────────────────────────────────
     def _build_server_tab(self, nb):
         f = ttk.Frame(nb, padding=10)
         nb.add(f, text=" Server ")
@@ -462,6 +536,9 @@ class PerAppProxyGUI:
         ttk.Label(info, text="Global:").grid(row=0, column=2, sticky="w")
         self.global_lbl = ttk.Label(info, text=self.config.global_upstream or "(none)")
         self.global_lbl.grid(row=0, column=3, sticky="w", padx=(5, 0))
+        ttk.Label(info, text="Rules:").grid(row=0, column=4, sticky="w", padx=(20, 0))
+        self.rules_count_lbl = ttk.Label(info, text=str(len(self.config.rules)))
+        self.rules_count_lbl.grid(row=0, column=5, sticky="w", padx=(5, 0))
 
         ctrl = ttk.Frame(f)
         ctrl.pack(fill="x", pady=(0, 10))
@@ -472,7 +549,7 @@ class PerAppProxyGUI:
         ttk.Button(ctrl, text="Proxy ON", command=self._proxy_on).pack(side="left", padx=(0, 5))
         ttk.Button(ctrl, text="Proxy OFF", command=self._proxy_off).pack(side="left")
 
-        gf = ttk.LabelFrame(f, text="Default Proxy", padding=5)
+        gf = ttk.LabelFrame(f, text="Default Proxy (global)", padding=5)
         gf.pack(fill="x")
         self.global_entry = ttk.Entry(gf)
         self.global_entry.insert(0, self.config.global_upstream)
@@ -484,14 +561,17 @@ class PerAppProxyGUI:
             return
         self.server = ProxyServer(self.config.listen_host, self.config.listen_port, self.config)
         self.loop = asyncio.new_event_loop()
+
         def run():
             asyncio.set_event_loop(self.loop)
             self.loop.run_until_complete(self.server.start())
             self.loop.run_forever()
+
         threading.Thread(target=run, daemon=True).start()
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.status_label.config(text="Running", foreground="green")
+        self._set_status("Server running")
 
     def _stop(self):
         if self.server and self.server.is_running and self.loop:
@@ -499,13 +579,16 @@ class PerAppProxyGUI:
         self.start_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
         self.status_label.config(text="Stopped", foreground="red")
+        self._set_status("Server stopped")
 
     def _proxy_on(self):
         set_system_proxy(self.config.listen_host, self.config.listen_port)
+        log_to_gui(f"System proxy ON -> 127.0.0.1:{self.config.listen_port}")
         messagebox.showinfo("OK", f"System proxy ON -> 127.0.0.1:{self.config.listen_port}")
 
     def _proxy_off(self):
         disable_system_proxy()
+        log_to_gui("System proxy OFF")
         messagebox.showinfo("OK", "System proxy OFF")
 
     def _set_global(self):
@@ -513,9 +596,10 @@ class PerAppProxyGUI:
         self.config.global_upstream = v
         save_config(self.config)
         self.global_lbl.config(text=v or "(none)")
+        log_to_gui(f"Global proxy set: {v or '(none)'}")
         messagebox.showinfo("OK", f"Global: {v or '(none)'}")
 
-    # ─── RULES ───
+    # ─── RULES TAB ─────────────────────────────────────
     def _build_rules_tab(self, nb):
         f = ttk.Frame(nb, padding=10)
         nb.add(f, text=" Rules ")
@@ -545,6 +629,7 @@ class PerAppProxyGUI:
         bf = ttk.Frame(f)
         bf.pack(fill="x", pady=(5, 0))
         ttk.Button(bf, text="Remove Selected", command=self._rm_rule).pack(side="left")
+        ttk.Button(bf, text="Clear All Rules", command=self._clear_rules).pack(side="left", padx=(10, 0))
         ttk.Button(bf, text="Refresh", command=self._refresh_rules).pack(side="right")
         self._refresh_rules()
 
@@ -554,6 +639,7 @@ class PerAppProxyGUI:
             self.rules_tree.delete(i)
         for r in self.config.rules:
             self.rules_tree.insert("", "end", values=(r.process, r.upstream))
+        self.rules_count_lbl.config(text=str(len(self.config.rules)))
 
     def _add_rule(self):
         p, u = self.proc_entry.get().strip(), self.up_entry.get().strip()
@@ -563,6 +649,7 @@ class PerAppProxyGUI:
         self.config.rules = [r for r in self.config.rules if r.process.lower() != p.lower()]
         self.config.rules.append(Rule(process=p, upstream=u))
         save_config(self.config)
+        log_to_gui(f"Rule added: {p} -> {u}")
         self.proc_entry.delete(0, "end")
         self.up_entry.delete(0, "end")
         self._refresh_rules()
@@ -571,10 +658,20 @@ class PerAppProxyGUI:
         for item in self.rules_tree.selection():
             p = self.rules_tree.item(item)["values"][0]
             self.config.rules = [r for r in self.config.rules if r.process.lower() != p.lower()]
+            log_to_gui(f"Rule removed: {p}")
         save_config(self.config)
         self._refresh_rules()
 
-    # ─── POOL ───
+    def _clear_rules(self):
+        if not self.config.rules:
+            return
+        if messagebox.askyesno("Confirm", f"Remove all {len(self.config.rules)} rules?"):
+            self.config.rules.clear()
+            save_config(self.config)
+            log_to_gui("All rules cleared")
+            self._refresh_rules()
+
+    # ─── POOL TAB ──────────────────────────────────────
     def _build_pool_tab(self, nb):
         f = ttk.Frame(nb, padding=10)
         nb.add(f, text=" Proxy Pool ")
@@ -583,11 +680,13 @@ class PerAppProxyGUI:
         ctrl.pack(fill="x", pady=(0, 10))
         ttk.Button(ctrl, text="Fetch", command=self._pool_fetch).pack(side="left", padx=(0, 5))
         ttk.Button(ctrl, text="Check Alive", command=self._pool_check).pack(side="left", padx=(0, 5))
-        ttk.Button(ctrl, text="Refresh", command=self._refresh_pool).pack(side="left", padx=(0, 20))
+        ttk.Button(ctrl, text="Refresh", command=self._refresh_pool).pack(side="left", padx=(0, 5))
+        ttk.Button(ctrl, text="Clear Pool", command=self._pool_clear).pack(side="left", padx=(0, 20))
         ttk.Label(ctrl, text="Add:").pack(side="left")
         self.pool_entry = ttk.Entry(ctrl, width=25)
         self.pool_entry.pack(side="left", padx=5)
-        ttk.Button(ctrl, text="+", command=self._pool_add).pack(side="left")
+        ttk.Button(ctrl, text="+", command=self._pool_add).pack(side="left", padx=(0, 5))
+        ttk.Button(ctrl, text="Remove Selected", command=self._pool_rm).pack(side="left")
 
         lf = ttk.LabelFrame(f, text="Pool", padding=5)
         lf.pack(fill="both", expand=True)
@@ -604,6 +703,9 @@ class PerAppProxyGUI:
         sb = ttk.Scrollbar(lf, orient="vertical", command=self.pool_tree.yview)
         sb.pack(side="right", fill="y")
         self.pool_tree.configure(yscrollcommand=sb.set)
+
+        self.pool_stats = ttk.Label(f, text="")
+        self.pool_stats.pack(fill="x", pady=(5, 0))
         self._refresh_pool()
 
     def _refresh_pool(self):
@@ -614,6 +716,8 @@ class PerAppProxyGUI:
             status = "OK" if p.alive else "DEAD"
             lat = f"{p.latency_ms:.0f}ms" if p.latency_ms > 0 else "-"
             self.pool_tree.insert("", "end", values=(p.address, p.protocol, lat, status))
+        stats = self.pool.count()
+        self.pool_stats.config(text=f"Total: {stats['total']} | Alive: {stats['alive']} | Dead: {stats['dead']}")
 
     def _pool_fetch(self):
         def do():
@@ -637,11 +741,30 @@ class PerAppProxyGUI:
         self.pool_entry.delete(0, "end")
         self._refresh_pool()
 
-    # ─── SCANNER ───
+    def _pool_rm(self):
+        for item in self.pool_tree.selection():
+            addr = self.pool_tree.item(item)["values"][0]
+            self.pool.remove(addr)
+        self._refresh_pool()
+
+    def _pool_clear(self):
+        stats = self.pool.count()
+        if stats["total"] == 0:
+            return
+        if messagebox.askyesno("Confirm", f"Clear all {stats['total']} proxies?"):
+            self.pool.clear()
+            self._refresh_pool()
+
+    # ─── SCANNER TAB ───────────────────────────────────
     def _build_scanner_tab(self, nb):
         f = ttk.Frame(nb, padding=10)
         nb.add(f, text=" Scanner ")
-        ttk.Button(f, text="Scan Connections", command=self._scan).pack(pady=(0, 10))
+
+        btn_frame = ttk.Frame(f)
+        btn_frame.pack(fill="x", pady=(0, 10))
+        ttk.Button(btn_frame, text="Scan Connections", command=self._scan).pack(side="left")
+        ttk.Button(btn_frame, text="Clear", command=self._scan_clear).pack(side="left", padx=(10, 0))
+
         lf = ttk.Frame(f)
         lf.pack(fill="both", expand=True)
         self.scan_tree = ttk.Treeview(lf, columns=("proc", "count", "remote"), show="headings", height=15)
@@ -650,7 +773,7 @@ class PerAppProxyGUI:
         self.scan_tree.heading("remote", text="Remote")
         self.scan_tree.column("proc", width=200)
         self.scan_tree.column("count", width=60)
-        self.scan_tree.column("remote", width=400)
+        self.scan_tree.column("remote", width=440)
         self.scan_tree.pack(fill="both", expand=True, side="left")
         sb = ttk.Scrollbar(lf, orient="vertical", command=self.scan_tree.yview)
         sb.pack(side="right", fill="y")
@@ -674,14 +797,75 @@ class PerAppProxyGUI:
         for proc, cl in sorted(by_proc.items()):
             remotes = [f"{c.raddr.ip}:{c.raddr.port}" for c in cl[:3] if c.raddr]
             self.scan_tree.insert("", "end", values=(proc, len(cl), ", ".join(remotes)))
+        log_to_gui(f"Scan: found {len(by_proc)} processes")
+
+    def _scan_clear(self):
+        for i in self.scan_tree.get_children():
+            self.scan_tree.delete(i)
+
+    # ─── LOG TAB ───────────────────────────────────────
+    def _build_log_tab(self, nb):
+        f = ttk.Frame(nb, padding=10)
+        nb.add(f, text=" Logs ")
+
+        ctrl = ttk.Frame(f)
+        ctrl.pack(fill="x", pady=(0, 5))
+        ttk.Button(ctrl, text="Clear Logs", command=self._clear_logs).pack(side="left")
+        ttk.Button(ctrl, text="Open Log File", command=self._open_log).pack(side="left", padx=(10, 0))
+        ttk.Label(ctrl, text=f"File: {LOG_DIR / 'proxy.log'}").pack(side="right")
+
+        self.log_text = scrolledtext.ScrolledText(f, height=20, font=("Consolas", 9), state="disabled", bg="#1e1e1e", fg="#d4d4d4", insertbackground="white")
+        self.log_text.pack(fill="both", expand=True)
+        self.log_text.tag_config("INFO", foreground="#d4d4d4")
+        self.log_text.tag_config("WARNING", foreground="#e5c07b")
+        self.log_text.tag_config("ERROR", foreground="#e06c75")
+        self.log_text.tag_config("DEBUG", foreground="#61afef")
+
+    def _poll_logs(self):
+        while not self._log_queue.empty():
+            msg, level = self._log_queue.get_nowait()
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.log_text.config(state="normal")
+            self.log_text.insert("end", f"[{ts}] [{level}] {msg}\n", level)
+            self.log_text.see("end")
+            self.log_text.config(state="disabled")
+        self.root.after(100, self._poll_logs)
+
+    def _clear_logs(self):
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
+
+    def _open_log(self):
+        os.startfile(str(LOG_DIR / "proxy.log"))
+
+    # ─── STATUS BAR ────────────────────────────────────
+    def _set_status(self, msg: str):
+        self.status_bar.config(text=msg)
 
     def _refresh_status(self):
         self.listen_lbl.config(text=f"{self.config.listen_host}:{self.config.listen_port}")
         self.global_lbl.config(text=self.config.global_upstream or "(none)")
+        self.rules_count_lbl.config(text=str(len(self.config.rules)))
+        stats = self.pool.count()
+        self._set_status(f"Pool: {stats['alive']} alive / {stats['total']} total | Rules: {len(self.config.rules)}")
 
     def run(self):
         self.root.mainloop()
 
 
+# ─── MAIN ─────────────────────────────────────────────────────
+
+import queue
+
+app: PerAppProxyGUI
+
+
+def main():
+    global app
+    app = PerAppProxyGUI()
+    app.run()
+
+
 if __name__ == "__main__":
-    PerAppProxyGUI().run()
+    main()
